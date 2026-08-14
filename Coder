@@ -1,0 +1,605 @@
+-- ====================================================================
+-- GEMINI EXECUTOR AI (MAX TOKENS + DIRECT MEMORY COPY BUFFER FIX)
+-- ====================================================================
+
+local CoreGui = game:GetService("CoreGui")
+local HttpService = game:GetService("HttpService")
+
+-- Cleanup existing instances
+if CoreGui:FindFirstChild("RobloxGeminiSystem") then
+    CoreGui.RobloxGeminiSystem:Destroy()
+end
+
+-- ====================================================================
+-- GLOBAL STATE & MEMORY BUFFER
+-- ====================================================================
+local API_KEY = ""
+local SELECTED_MODEL_PATH = ""
+local ConversationHistory = {}
+local StoredScripts = {} -- Holds full raw code bypassing UI string limits
+
+-- System Instruction tailored for Mobile Executors
+local SystemInstruction = [[
+You are an AI assistant specialized in writing Luau scripts for Roblox mobile executors.
+
+BEHAVIOR RULES:
+1. If the user sends a greeting (e.g., "hi", "hello") or asks a general question, reply naturally and conversationally.
+2. If the user asks you to create, script, or write anything, respond ONLY with functional, clean Luau code. Do NOT include markdown code blocks (such as ```lua or ```), introductions, notes, or explanations. Output pure, direct, executable code.
+]]
+
+-- Universal Clipboard Handler
+local function copyToClipboard(str)
+    if setclipboard then pcall(setclipboard, str) return true end
+    if toclipboard then pcall(toclipboard, str) return true end
+    if set_clipboard then pcall(set_clipboard, str) return true end
+    if Clipboard and Clipboard.set then pcall(Clipboard.set, str) return true end
+    return false
+end
+
+-- Helper function for executor HTTP requests
+local function sendHttpRequest(options)
+    local requestFuncs = {
+        request,
+        http_request,
+        (http and http.request),
+        (syn and syn.request),
+        (fluxus and fluxus.request)
+    }
+
+    for _, fn in ipairs(requestFuncs) do
+        if type(fn) == "function" then
+            local success, response = pcall(function() return fn(options) end)
+            if success and response then
+                return response
+            end
+        end
+    end
+    return nil
+end
+
+-- ====================================================================
+-- MAIN GUI CONTAINER
+-- ====================================================================
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "RobloxGeminiSystem"
+ScreenGui.ResetOnSpawn = false
+ScreenGui.Parent = CoreGui
+
+-- ====================================================================
+-- STEP 1: API KEY INPUT WINDOW
+-- ====================================================================
+local KeyFrame = Instance.new("Frame")
+KeyFrame.Name = "KeyFrame"
+KeyFrame.Size = UDim2.new(0, 420, 0, 260)
+KeyFrame.Position = UDim2.new(0.5, -210, 0.5, -130)
+KeyFrame.BackgroundColor3 = Color3.fromRGB(25, 27, 32)
+KeyFrame.BorderSizePixel = 0
+KeyFrame.Active = true
+KeyFrame.Draggable = true
+KeyFrame.Parent = ScreenGui
+
+local KeyCorner = Instance.new("UICorner")
+KeyCorner.CornerRadius = UDim.new(0, 10)
+KeyCorner.Parent = KeyFrame
+
+local KeyTitle = Instance.new("TextLabel")
+KeyTitle.Size = UDim2.new(1, -20, 0, 35)
+KeyTitle.Position = UDim2.new(0, 10, 0, 10)
+KeyTitle.BackgroundTransparency = 1
+KeyTitle.Text = "Gemini AI Setup"
+KeyTitle.TextColor3 = Color3.fromRGB(255, 255, 255)
+KeyTitle.Font = Enum.Font.SourceSansBold
+KeyTitle.TextSize = 20
+KeyTitle.Parent = KeyFrame
+
+local LinkInfo = Instance.new("TextLabel")
+LinkInfo.Size = UDim2.new(1, -20, 0, 35)
+LinkInfo.Position = UDim2.new(0, 10, 0, 45)
+LinkInfo.BackgroundTransparency = 1
+LinkInfo.Text = "Paste your Google AI Studio API Key below:"
+LinkInfo.TextColor3 = Color3.fromRGB(160, 180, 255)
+LinkInfo.Font = Enum.Font.SourceSans
+LinkInfo.TextSize = 14
+LinkInfo.TextWrapped = true
+LinkInfo.Parent = KeyFrame
+
+local KeyInput = Instance.new("TextBox")
+KeyInput.Size = UDim2.new(1, -30, 0, 45)
+KeyInput.Position = UDim2.new(0, 15, 0, 95)
+KeyInput.BackgroundColor3 = Color3.fromRGB(35, 38, 46)
+KeyInput.TextColor3 = Color3.fromRGB(255, 255, 255)
+KeyInput.PlaceholderText = "AQ.Ab8RN..."
+KeyInput.PlaceholderColor3 = Color3.fromRGB(120, 125, 140)
+KeyInput.Text = ""
+KeyInput.ClearTextOnFocus = false
+KeyInput.Font = Enum.Font.Code
+KeyInput.TextSize = 13
+KeyInput.Parent = KeyFrame
+
+local KeyInputCorner = Instance.new("UICorner")
+KeyInputCorner.CornerRadius = UDim.new(0, 6)
+KeyInputCorner.Parent = KeyInput
+
+local SubmitKeyBtn = Instance.new("TextButton")
+SubmitKeyBtn.Size = UDim2.new(1, -30, 0, 40)
+SubmitKeyBtn.Position = UDim2.new(0, 15, 0, 160)
+SubmitKeyBtn.BackgroundColor3 = Color3.fromRGB(70, 110, 240)
+SubmitKeyBtn.Text = "Verify Key & Fetch Models"
+SubmitKeyBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+SubmitKeyBtn.Font = Enum.Font.SourceSansBold
+SubmitKeyBtn.TextSize = 16
+SubmitKeyBtn.Parent = KeyFrame
+
+local SubmitCorner = Instance.new("UICorner")
+SubmitCorner.CornerRadius = UDim.new(0, 6)
+SubmitCorner.Parent = SubmitKeyBtn
+
+local StatusLabel = Instance.new("TextLabel")
+StatusLabel.Size = UDim2.new(1, -30, 0, 20)
+StatusLabel.Position = UDim2.new(0, 15, 0, 210)
+StatusLabel.BackgroundTransparency = 1
+StatusLabel.Text = ""
+StatusLabel.TextColor3 = Color3.fromRGB(255, 100, 100)
+StatusLabel.Font = Enum.Font.SourceSans
+StatusLabel.TextSize = 13
+StatusLabel.Parent = KeyFrame
+
+-- ====================================================================
+-- STEP 2: MODEL SELECTION WINDOW
+-- ====================================================================
+local ModelFrame = Instance.new("Frame")
+ModelFrame.Name = "ModelFrame"
+ModelFrame.Size = UDim2.new(0, 420, 0, 280)
+ModelFrame.Position = UDim2.new(0.5, -210, 0.5, -140)
+ModelFrame.BackgroundColor3 = Color3.fromRGB(25, 27, 32)
+ModelFrame.BorderSizePixel = 0
+ModelFrame.Active = true
+ModelFrame.Visible = false
+ModelFrame.Parent = ScreenGui
+
+local ModelCorner = Instance.new("UICorner")
+ModelCorner.CornerRadius = UDim.new(0, 10)
+ModelCorner.Parent = ModelFrame
+
+local ModelTitle = Instance.new("TextLabel")
+ModelTitle.Size = UDim2.new(1, -20, 0, 35)
+ModelTitle.Position = UDim2.new(0, 10, 0, 10)
+ModelTitle.BackgroundTransparency = 1
+ModelTitle.Text = "Select Available Model"
+ModelTitle.TextColor3 = Color3.fromRGB(255, 255, 255)
+ModelTitle.Font = Enum.Font.SourceSansBold
+ModelTitle.TextSize = 20
+ModelTitle.Parent = ModelFrame
+
+local ModelScroll = Instance.new("ScrollingFrame")
+ModelScroll.Size = UDim2.new(1, -30, 0, 200)
+ModelScroll.Position = UDim2.new(0, 15, 0, 55)
+ModelScroll.BackgroundColor3 = Color3.fromRGB(18, 20, 24)
+ModelScroll.BorderSizePixel = 0
+ModelScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+ModelScroll.ScrollBarThickness = 6
+ModelScroll.Parent = ModelFrame
+
+local ScrollCorner = Instance.new("UICorner")
+ScrollCorner.CornerRadius = UDim.new(0, 6)
+ScrollCorner.Parent = ModelScroll
+
+local UIListLayout = Instance.new("UIListLayout")
+UIListLayout.Padding = UDim.new(0, 6)
+UIListLayout.SortOrder = Enum.SortOrder.LayoutOrder
+UIListLayout.Parent = ModelScroll
+
+-- ====================================================================
+-- STEP 3: COMPACT CHAT OVERLAY
+-- ====================================================================
+local TopBarBtn = Instance.new("TextButton")
+TopBarBtn.Name = "TopBarAIButton"
+TopBarBtn.Size = UDim2.new(0, 44, 0, 44)
+TopBarBtn.Position = UDim2.new(1, -60, 0, 12)
+TopBarBtn.BackgroundColor3 = Color3.fromRGB(30, 32, 38)
+TopBarBtn.Text = "AI"
+TopBarBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+TopBarBtn.Font = Enum.Font.SourceSansBold
+TopBarBtn.TextSize = 18
+TopBarBtn.Visible = false
+TopBarBtn.Parent = ScreenGui
+
+local TopBarCorner = Instance.new("UICorner")
+TopBarCorner.CornerRadius = UDim.new(0, 9)
+TopBarCorner.Parent = TopBarBtn
+
+local ChatFrame = Instance.new("Frame")
+ChatFrame.Name = "ChatFrame"
+ChatFrame.Size = UDim2.new(0, 440, 0, 330)
+ChatFrame.Position = UDim2.new(0.5, -220, 1, 10)
+ChatFrame.BackgroundColor3 = Color3.fromRGB(20, 22, 27)
+ChatFrame.BorderSizePixel = 0
+ChatFrame.Visible = false
+ChatFrame.Active = true
+ChatFrame.Draggable = true
+ChatFrame.Parent = ScreenGui
+
+local ChatCorner = Instance.new("UICorner")
+ChatCorner.CornerRadius = UDim.new(0, 12)
+ChatCorner.Parent = ChatFrame
+
+local Header = Instance.new("Frame")
+Header.Size = UDim2.new(1, 0, 0, 42)
+Header.BackgroundColor3 = Color3.fromRGB(28, 30, 38)
+Header.BorderSizePixel = 0
+Header.Parent = ChatFrame
+
+local HeaderCorner = Instance.new("UICorner")
+HeaderCorner.CornerRadius = UDim.new(0, 12)
+HeaderCorner.Parent = Header
+
+local GeminiTitle = Instance.new("TextLabel")
+GeminiTitle.Size = UDim2.new(0, 300, 0, 30)
+GeminiTitle.Position = UDim2.new(0, 12, 0, 6)
+GeminiTitle.BackgroundTransparency = 1
+GeminiTitle.Text = "Gemini AI"
+GeminiTitle.TextColor3 = Color3.fromRGB(255, 255, 255)
+GeminiTitle.TextXAlignment = Enum.TextXAlignment.Left
+GeminiTitle.Font = Enum.Font.SourceSansBold
+GeminiTitle.TextSize = 16
+GeminiTitle.Parent = Header
+
+local CloseBtn = Instance.new("TextButton")
+CloseBtn.Size = UDim2.new(0, 30, 0, 30)
+CloseBtn.Position = UDim2.new(1, -36, 0, 6)
+CloseBtn.BackgroundTransparency = 1
+CloseBtn.Text = "✕"
+CloseBtn.TextColor3 = Color3.fromRGB(180, 180, 190)
+CloseBtn.Font = Enum.Font.SourceSansBold
+CloseBtn.TextSize = 16
+CloseBtn.Parent = Header
+
+local ChatScroll = Instance.new("ScrollingFrame")
+ChatScroll.Size = UDim2.new(1, -20, 0, 220)
+ChatScroll.Position = UDim2.new(0, 10, 0, 48)
+ChatScroll.BackgroundTransparency = 1
+ChatScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+ChatScroll.ScrollBarThickness = 4
+ChatScroll.Parent = ChatFrame
+
+local ChatListLayout = Instance.new("UIListLayout")
+ChatListLayout.Padding = UDim.new(0, 8)
+ChatListLayout.SortOrder = Enum.SortOrder.LayoutOrder
+ChatListLayout.Parent = ChatScroll
+
+local InputContainer = Instance.new("Frame")
+InputContainer.Size = UDim2.new(1, -20, 0, 40)
+InputContainer.Position = UDim2.new(0, 10, 0, 278)
+InputContainer.BackgroundColor3 = Color3.fromRGB(32, 35, 44)
+InputContainer.Parent = ChatFrame
+
+local InputContainerCorner = Instance.new("UICorner")
+InputContainerCorner.CornerRadius = UDim.new(0, 8)
+InputContainerCorner.Parent = InputContainer
+
+local ChatInput = Instance.new("TextBox")
+ChatInput.Size = UDim2.new(1, -65, 1, 0)
+ChatInput.Position = UDim2.new(0, 10, 0, 0)
+ChatInput.BackgroundTransparency = 1
+ChatInput.TextColor3 = Color3.fromRGB(255, 255, 255)
+ChatInput.PlaceholderText = "Request a script..."
+ChatInput.PlaceholderColor3 = Color3.fromRGB(130, 135, 150)
+ChatInput.Text = ""
+ChatInput.ClearTextOnFocus = false
+ChatInput.Font = Enum.Font.SourceSans
+ChatInput.TextSize = 14
+ChatInput.Parent = InputContainer
+
+local SendBtn = Instance.new("TextButton")
+SendBtn.Size = UDim2.new(0, 50, 0, 30)
+SendBtn.Position = UDim2.new(1, -55, 0, 5)
+SendBtn.BackgroundColor3 = Color3.fromRGB(70, 110, 240)
+SendBtn.Text = "Send"
+SendBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+SendBtn.Font = Enum.Font.SourceSansBold
+SendBtn.TextSize = 13
+SendBtn.Parent = InputContainer
+
+local SendCorner = Instance.new("UICorner")
+SendCorner.CornerRadius = UDim.new(0, 6)
+SendCorner.Parent = SendBtn
+
+-- ====================================================================
+-- CHAT BUBBLE RENDERER (MEMORY DEDICATED COPY SYSTEM)
+-- ====================================================================
+local function addChatBubble(sender, rawMessage)
+    local isUser = (sender == "User")
+    local hasCopyBtn = not isUser
+    local extraHeight = hasCopyBtn and 30 or 0
+
+    -- Save exact raw code to Lua memory buffer
+    local scriptIndex = #StoredScripts + 1
+    StoredScripts[scriptIndex] = rawMessage
+
+    local BubbleFrame = Instance.new("Frame")
+    BubbleFrame.Size = UDim2.new(1, 0, 0, 0)
+    BubbleFrame.BackgroundTransparency = 1
+    BubbleFrame.Parent = ChatScroll
+
+    -- Calculate scroll canvas & bubble height safely
+    local _, lineCount = rawMessage:gsub("\n", "\n")
+    lineCount = lineCount + 1
+    local fontHeight = 16
+    local calculatedTextHeight = lineCount * fontHeight
+
+    local textBounds = game:GetService("TextService"):GetTextSize(
+        rawMessage,
+        13,
+        isUser and Enum.Font.SourceSans or Enum.Font.Code,
+        Vector2.new(300, 50000)
+    )
+
+    local finalHeight = math.max(calculatedTextHeight, textBounds.Y) + 20 + extraHeight
+
+    local Bubble = Instance.new("Frame")
+    Bubble.BackgroundColor3 = isUser and Color3.fromRGB(50, 90, 210) or Color3.fromRGB(30, 33, 42)
+    Bubble.BorderSizePixel = 0
+    Bubble.Size = UDim2.new(0, math.clamp(textBounds.X + 24, 120, 380), 0, finalHeight)
+    Bubble.Parent = BubbleFrame
+
+    local BubbleCorner = Instance.new("UICorner")
+    BubbleCorner.CornerRadius = UDim.new(0, 8)
+    BubbleCorner.Parent = Bubble
+
+    local TextLabel = Instance.new("TextBox")
+    TextLabel.Size = UDim2.new(1, -16, 1, -12 - extraHeight)
+    TextLabel.Position = UDim2.new(0, 8, 0, 6)
+    TextLabel.BackgroundTransparency = 1
+    TextLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+    TextLabel.Text = rawMessage
+    TextLabel.TextXAlignment = Enum.TextXAlignment.Left
+    TextLabel.TextYAlignment = Enum.TextYAlignment.Top
+    TextLabel.MultiLine = true
+    TextLabel.ClearTextOnFocus = false
+    TextLabel.TextWrapped = true
+    TextLabel.Font = isUser and Enum.Font.SourceSans or Enum.Font.Code
+    TextLabel.TextSize = 13
+    TextLabel.Parent = Bubble
+
+    if isUser then
+        Bubble.Position = UDim2.new(1, -Bubble.Size.X.Offset, 0, 0)
+    else
+        Bubble.Position = UDim2.new(0, 0, 0, 0)
+
+        local CopyBtn = Instance.new("TextButton")
+        CopyBtn.Name = "CopyButton"
+        CopyBtn.Size = UDim2.new(0, 110, 0, 24)
+        CopyBtn.Position = UDim2.new(0, 8, 1, -28)
+        CopyBtn.BackgroundColor3 = Color3.fromRGB(55, 60, 75)
+        CopyBtn.Text = "📋 Copy Code"
+        CopyBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+        CopyBtn.Font = Enum.Font.SourceSansBold
+        CopyBtn.TextSize = 11
+        CopyBtn.Parent = Bubble
+
+        local CopyCorner = Instance.new("UICorner")
+        CopyCorner.CornerRadius = UDim.new(0, 5)
+        CopyCorner.Parent = CopyBtn
+
+        -- Directly copy from memory table index (never cut off)
+        CopyBtn.MouseButton1Click:Connect(function()
+            local fullScript = StoredScripts[scriptIndex]
+            if copyToClipboard(fullScript) then
+                CopyBtn.Text = "✓ Copied All!"
+                CopyBtn.BackgroundColor3 = Color3.fromRGB(40, 160, 80)
+                task.delay(1.5, function()
+                    CopyBtn.Text = "📋 Copy Code"
+                    CopyBtn.BackgroundColor3 = Color3.fromRGB(55, 60, 75)
+                end)
+            else
+                CopyBtn.Text = "Copy Failed"
+            end
+        end)
+    end
+
+    BubbleFrame.Size = UDim2.new(1, 0, 0, finalHeight)
+    ChatScroll.CanvasSize = UDim2.new(0, 0, 0, ChatListLayout.AbsoluteContentSize.Y + 20)
+    ChatScroll.CanvasPosition = Vector2.new(0, ChatScroll.CanvasSize.Y.Offset)
+end
+
+-- ====================================================================
+-- GEMINI API COMMUNICATION WITH MAX TOKEN EXPANSION
+-- ====================================================================
+local function sendToGemini(userPrompt)
+    addChatBubble("User", userPrompt)
+    table.insert(ConversationHistory, {
+        role = "user",
+        parts = { { text = userPrompt } }
+    })
+
+    local endpoint = "https://generativelanguage.googleapis.com/v1beta/" .. SELECTED_MODEL_PATH .. ":generateContent?key=" .. API_KEY
+
+    local payload = {
+        systemInstruction = {
+            parts = { { text = SystemInstruction } }
+        },
+        contents = ConversationHistory,
+        generationConfig = {
+            maxOutputTokens = 8192, -- Prevents API truncating long scripts
+            temperature = 0.2
+        }
+    }
+
+    local requestOptions = {
+        Url = endpoint,
+        Method = "POST",
+        Headers = {
+            ["Content-Type"] = "application/json"
+        },
+        Body = HttpService:JSONEncode(payload)
+    }
+
+    task.spawn(function()
+        local response = sendHttpRequest(requestOptions)
+
+        if response then
+            local bodyText = response.Body or response.body
+            if bodyText then
+                local success, decoded = pcall(function() return HttpService:JSONDecode(bodyText) end)
+                if success and decoded and decoded.candidates and decoded.candidates[1] then
+                    local replyText = decoded.candidates[1].content.parts[1].text
+                    
+                    -- Clean residual codeblock backticks
+                    replyText = replyText:gsub("^```%w*\n", ""):gsub("\n```$", ""):gsub("^```", ""):gsub("```$", "")
+
+                    table.insert(ConversationHistory, {
+                        role = "model",
+                        parts = { { text = replyText } }
+                    })
+
+                    addChatBubble("Gemini", replyText)
+                    return
+                elseif decoded and decoded.error then
+                    addChatBubble("Gemini", "[API Error]: " .. tostring(decoded.error.message))
+                    return
+                end
+            end
+        end
+
+        addChatBubble("Gemini", "[Error]: Request failed. Check executor web permissions.")
+    end)
+end
+
+-- ====================================================================
+-- DYNAMIC MODEL FETCHING
+-- ====================================================================
+local function fetchAvailableModels(key)
+    StatusLabel.TextColor3 = Color3.fromRGB(200, 200, 255)
+    StatusLabel.Text = "Connecting to Google API..."
+    
+    local listEndpoint = "https://generativelanguage.googleapis.com/v1beta/models?key=" .. key
+    local requestOptions = {
+        Url = listEndpoint,
+        Method = "GET"
+    }
+
+    task.spawn(function()
+        local response = sendHttpRequest(requestOptions)
+        if not response then
+            StatusLabel.TextColor3 = Color3.fromRGB(255, 100, 100)
+            StatusLabel.Text = "HTTP Error: Unable to make request."
+            return
+        end
+
+        local bodyText = response.Body or response.body
+        if not bodyText then
+            StatusLabel.TextColor3 = Color3.fromRGB(255, 100, 100)
+            StatusLabel.Text = "Empty response received."
+            return
+        end
+
+        local success, decoded = pcall(function() return HttpService:JSONDecode(bodyText) end)
+        if not success or not decoded then
+            StatusLabel.TextColor3 = Color3.fromRGB(255, 100, 100)
+            StatusLabel.Text = "Failed to parse API response."
+            return
+        end
+
+        if decoded.error then
+            StatusLabel.TextColor3 = Color3.fromRGB(255, 100, 100)
+            StatusLabel.Text = "API Error: " .. tostring(decoded.error.message)
+            return
+        end
+
+        if decoded.models then
+            local count = 0
+            for _, model in ipairs(decoded.models) do
+                local supportsGenerate = false
+                if model.supportedGenerationMethods then
+                    for _, method in ipairs(model.supportedGenerationMethods) do
+                        if method == "generateContent" then
+                            supportsGenerate = true
+                            break
+                        end
+                    end
+                end
+
+                if supportsGenerate then
+                    count = count + 1
+                    local cleanName = model.displayName or model.name:gsub("models/", "")
+                    local fullPath = model.name
+
+                    local ModelBtn = Instance.new("TextButton")
+                    ModelBtn.Size = UDim2.new(1, -10, 0, 42)
+                    ModelBtn.BackgroundColor3 = Color3.fromRGB(32, 35, 44)
+                    ModelBtn.Text = cleanName .. " (" .. model.name:gsub("models/", "") .. ")"
+                    ModelBtn.TextColor3 = Color3.fromRGB(240, 240, 245)
+                    ModelBtn.Font = Enum.Font.SourceSansBold
+                    ModelBtn.TextSize = 13
+                    ModelBtn.Parent = ModelScroll                    local ModelBtnCorner = Instance.new("UICorner")
+                    ModelBtnCorner.CornerRadius = UDim.new(0, 6)
+                    ModelBtnCorner.Parent = ModelBtn
+
+                    ModelBtn.MouseButton1Click:Connect(function()
+                        SELECTED_MODEL_PATH = fullPath
+                        ModelFrame.Visible = false
+                        TopBarBtn.Visible = true
+                        ChatFrame.Visible = true
+                        GeminiTitle.Text = "Gemini (" .. model.name:gsub("models/", "") .. ")"
+
+                        ChatFrame:TweenPosition(UDim2.new(0.5, -220, 1, -345), Enum.EasingDirection.Out, Enum.EasingStyle.Quart, 0.4, true)
+                        addChatBubble("Gemini", "Hello! What script would you like me to build for you today?")
+                    end)
+                end
+            end
+
+            if count > 0 then
+                ModelScroll.CanvasSize = UDim2.new(0, 0, 0, count * 48)
+                KeyFrame.Visible = false
+                ModelFrame.Visible = true
+            else
+                StatusLabel.TextColor3 = Color3.fromRGB(255, 100, 100)
+                StatusLabel.Text = "No generateContent models found for this key."
+            end
+        end
+    end)
+end
+
+-- ====================================================================
+-- BUTTON CONNECTIONS
+-- ====================================================================
+SubmitKeyBtn.MouseButton1Click:Connect(function()
+    local key = KeyInput.Text:gsub("%s+", "")
+    if key == "" then
+        StatusLabel.Text = "Please enter an API key first."
+        return
+    end
+
+    API_KEY = key
+    fetchAvailableModels(key)
+end)
+
+local chatOpen = true
+local function toggleChat()
+    chatOpen = not chatOpen
+    if chatOpen then
+        ChatFrame.Visible = true
+        ChatFrame:TweenPosition(UDim2.new(0.5, -220, 1, -345), Enum.EasingDirection.Out, Enum.EasingStyle.Quart, 0.3, true)
+    else
+        ChatFrame:TweenPosition(UDim2.new(0.5, -220, 1, 10), Enum.EasingDirection.In, Enum.EasingStyle.Quart, 0.3, true, function()
+            ChatFrame.Visible = false
+        end)
+    end
+end
+
+TopBarBtn.MouseButton1Click:Connect(toggleChat)
+CloseBtn.MouseButton1Click:Connect(toggleChat)
+
+local function handleSend()
+    local text = ChatInput.Text
+    if text == "" then return end
+    ChatInput.Text = ""
+    sendToGemini(text)
+end
+
+SendBtn.MouseButton1Click:Connect(handleSend)
+ChatInput.FocusLost:Connect(function(enterPressed)
+    if enterPressed then
+        handleSend()
+    end
+end)
