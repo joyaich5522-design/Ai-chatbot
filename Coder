@@ -1,24 +1,19 @@
 -- ====================================================================
--- GEMINI EXECUTOR AI (MAX TOKENS + DIRECT MEMORY COPY BUFFER FIX)
+-- GEMINI EXECUTOR AI (FIXED VISIBILITY & DISPLAY)
 -- ====================================================================
 
 local CoreGui = game:GetService("CoreGui")
 local HttpService = game:GetService("HttpService")
 
--- Cleanup existing instances
 if CoreGui:FindFirstChild("RobloxGeminiSystem") then
     CoreGui.RobloxGeminiSystem:Destroy()
 end
 
--- ====================================================================
--- GLOBAL STATE & MEMORY BUFFER
--- ====================================================================
 local API_KEY = ""
 local SELECTED_MODEL_PATH = ""
 local ConversationHistory = {}
-local StoredScripts = {} -- Holds full raw code bypassing UI string limits
+local StoredScripts = {}
 
--- System Instruction tailored for Mobile Executors
 local SystemInstruction = [[
 You are an AI assistant specialized in writing Luau scripts for Roblox mobile executors.
 
@@ -27,7 +22,6 @@ BEHAVIOR RULES:
 2. If the user asks you to create, script, or write anything, respond ONLY with functional, clean Luau code. Do NOT include markdown code blocks (such as ```lua or ```), introductions, notes, or explanations. Output pure, direct, executable code.
 ]]
 
--- Universal Clipboard Handler
 local function copyToClipboard(str)
     if setclipboard then pcall(setclipboard, str) return true end
     if toclipboard then pcall(toclipboard, str) return true end
@@ -36,7 +30,6 @@ local function copyToClipboard(str)
     return false
 end
 
--- Helper function for executor HTTP requests
 local function sendHttpRequest(options)
     local requestFuncs = {
         request,
@@ -57,17 +50,12 @@ local function sendHttpRequest(options)
     return nil
 end
 
--- ====================================================================
--- MAIN GUI CONTAINER
--- ====================================================================
 local ScreenGui = Instance.new("ScreenGui")
 ScreenGui.Name = "RobloxGeminiSystem"
 ScreenGui.ResetOnSpawn = false
 ScreenGui.Parent = CoreGui
 
--- ====================================================================
--- STEP 1: API KEY INPUT WINDOW
--- ====================================================================
+-- STEP 1: KEY SETUP
 local KeyFrame = Instance.new("Frame")
 KeyFrame.Name = "KeyFrame"
 KeyFrame.Size = UDim2.new(0, 420, 0, 260)
@@ -108,7 +96,7 @@ KeyInput.Size = UDim2.new(1, -30, 0, 45)
 KeyInput.Position = UDim2.new(0, 15, 0, 95)
 KeyInput.BackgroundColor3 = Color3.fromRGB(35, 38, 46)
 KeyInput.TextColor3 = Color3.fromRGB(255, 255, 255)
-KeyInput.PlaceholderText = "AQ.Ab8RN..."
+KeyInput.PlaceholderText = "Paste API Key Here..."
 KeyInput.PlaceholderColor3 = Color3.fromRGB(120, 125, 140)
 KeyInput.Text = ""
 KeyInput.ClearTextOnFocus = false
@@ -144,9 +132,7 @@ StatusLabel.Font = Enum.Font.SourceSans
 StatusLabel.TextSize = 13
 StatusLabel.Parent = KeyFrame
 
--- ====================================================================
--- STEP 2: MODEL SELECTION WINDOW
--- ====================================================================
+-- STEP 2: MODEL SELECTION
 local ModelFrame = Instance.new("Frame")
 ModelFrame.Name = "ModelFrame"
 ModelFrame.Size = UDim2.new(0, 420, 0, 280)
@@ -189,9 +175,7 @@ UIListLayout.Padding = UDim.new(0, 6)
 UIListLayout.SortOrder = Enum.SortOrder.LayoutOrder
 UIListLayout.Parent = ModelScroll
 
--- ====================================================================
--- STEP 3: COMPACT CHAT OVERLAY
--- ====================================================================
+-- STEP 3: CHAT OVERLAY
 local TopBarBtn = Instance.new("TextButton")
 TopBarBtn.Name = "TopBarAIButton"
 TopBarBtn.Size = UDim2.new(0, 44, 0, 44)
@@ -211,7 +195,7 @@ TopBarCorner.Parent = TopBarBtn
 local ChatFrame = Instance.new("Frame")
 ChatFrame.Name = "ChatFrame"
 ChatFrame.Size = UDim2.new(0, 440, 0, 330)
-ChatFrame.Position = UDim2.new(0.5, -220, 1, 10)
+ChatFrame.Position = UDim2.new(0.5, -220, 0.5, -165)
 ChatFrame.BackgroundColor3 = Color3.fromRGB(20, 22, 27)
 ChatFrame.BorderSizePixel = 0
 ChatFrame.Visible = false
@@ -304,15 +288,12 @@ local SendCorner = Instance.new("UICorner")
 SendCorner.CornerRadius = UDim.new(0, 6)
 SendCorner.Parent = SendBtn
 
--- ====================================================================
--- CHAT BUBBLE RENDERER (MEMORY DEDICATED COPY SYSTEM)
--- ====================================================================
+-- RENDERER & API LOGIC
 local function addChatBubble(sender, rawMessage)
     local isUser = (sender == "User")
     local hasCopyBtn = not isUser
     local extraHeight = hasCopyBtn and 30 or 0
 
-    -- Save exact raw code to Lua memory buffer
     local scriptIndex = #StoredScripts + 1
     StoredScripts[scriptIndex] = rawMessage
 
@@ -321,7 +302,6 @@ local function addChatBubble(sender, rawMessage)
     BubbleFrame.BackgroundTransparency = 1
     BubbleFrame.Parent = ChatScroll
 
-    -- Calculate scroll canvas & bubble height safely
     local _, lineCount = rawMessage:gsub("\n", "\n")
     lineCount = lineCount + 1
     local fontHeight = 16
@@ -381,18 +361,15 @@ local function addChatBubble(sender, rawMessage)
         CopyCorner.CornerRadius = UDim.new(0, 5)
         CopyCorner.Parent = CopyBtn
 
-        -- Directly copy from memory table index (never cut off)
         CopyBtn.MouseButton1Click:Connect(function()
             local fullScript = StoredScripts[scriptIndex]
             if copyToClipboard(fullScript) then
-                CopyBtn.Text = "✓ Copied All!"
+                CopyBtn.Text = "✓ Copied!"
                 CopyBtn.BackgroundColor3 = Color3.fromRGB(40, 160, 80)
                 task.delay(1.5, function()
                     CopyBtn.Text = "📋 Copy Code"
                     CopyBtn.BackgroundColor3 = Color3.fromRGB(55, 60, 75)
                 end)
-            else
-                CopyBtn.Text = "Copy Failed"
             end
         end)
     end
@@ -402,9 +379,6 @@ local function addChatBubble(sender, rawMessage)
     ChatScroll.CanvasPosition = Vector2.new(0, ChatScroll.CanvasSize.Y.Offset)
 end
 
--- ====================================================================
--- GEMINI API COMMUNICATION WITH MAX TOKEN EXPANSION
--- ====================================================================
 local function sendToGemini(userPrompt)
     addChatBubble("User", userPrompt)
     table.insert(ConversationHistory, {
@@ -420,7 +394,7 @@ local function sendToGemini(userPrompt)
         },
         contents = ConversationHistory,
         generationConfig = {
-            maxOutputTokens = 8192, -- Prevents API truncating long scripts
+            maxOutputTokens = 8192,
             temperature = 0.2
         }
     }
@@ -428,23 +402,18 @@ local function sendToGemini(userPrompt)
     local requestOptions = {
         Url = endpoint,
         Method = "POST",
-        Headers = {
-            ["Content-Type"] = "application/json"
-        },
+        Headers = { ["Content-Type"] = "application/json" },
         Body = HttpService:JSONEncode(payload)
     }
 
     task.spawn(function()
         local response = sendHttpRequest(requestOptions)
-
         if response then
             local bodyText = response.Body or response.body
             if bodyText then
                 local success, decoded = pcall(function() return HttpService:JSONDecode(bodyText) end)
                 if success and decoded and decoded.candidates and decoded.candidates[1] then
                     local replyText = decoded.candidates[1].content.parts[1].text
-                    
-                    -- Clean residual codeblock backticks
                     replyText = replyText:gsub("^```%w*\n", ""):gsub("\n```$", ""):gsub("^```", ""):gsub("```$", "")
 
                     table.insert(ConversationHistory, {
@@ -454,152 +423,122 @@ local function sendToGemini(userPrompt)
 
                     addChatBubble("Gemini", replyText)
                     return
-                elseif decoded and decoded.error then
-                    addChatBubble("Gemini", "[API Error]: " .. tostring(decoded.error.message))
-                    return
                 end
             end
         end
-
-        addChatBubble("Gemini", "[Error]: Request failed. Check executor web permissions.")
+        addChatBubble("Gemini", "[Error]: Request failed. Check your connection or API key.")
     end)
 end
 
--- ====================================================================
--- DYNAMIC MODEL FETCHING
--- ====================================================================
+local function isWorkingModel(modelName)
+    local lowerName = modelName:lower()
+    if not lowerName:find("gemini") then return false end
+    
+    local invalidKeywords = { "embedding", "imagen", "aqa", "audio", "veo", "tts", "realtime", "computer-use", "bison", "gecko" }
+    for _, keyword in ipairs(invalidKeywords) do
+        if lowerName:find(keyword) then return false end
+    end
+    return true
+end
+
 local function fetchAvailableModels(key)
     StatusLabel.TextColor3 = Color3.fromRGB(200, 200, 255)
-    StatusLabel.Text = "Connecting to Google API..."
+    StatusLabel.Text = "Connecting to API..."
     
     local listEndpoint = "https://generativelanguage.googleapis.com/v1beta/models?key=" .. key
-    local requestOptions = {
-        Url = listEndpoint,
-        Method = "GET"
-    }
-
     task.spawn(function()
-        local response = sendHttpRequest(requestOptions)
+        local response = sendHttpRequest({ Url = listEndpoint, Method = "GET" })
         if not response then
             StatusLabel.TextColor3 = Color3.fromRGB(255, 100, 100)
-            StatusLabel.Text = "HTTP Error: Unable to make request."
+            StatusLabel.Text = "HTTP Error: Failed to reach API."
             return
         end
 
         local bodyText = response.Body or response.body
-        if not bodyText then
-            StatusLabel.TextColor3 = Color3.fromRGB(255, 100, 100)
-            StatusLabel.Text = "Empty response received."
-            return
-        end
-
         local success, decoded = pcall(function() return HttpService:JSONDecode(bodyText) end)
-        if not success or not decoded then
-            StatusLabel.TextColor3 = Color3.fromRGB(255, 100, 100)
-            StatusLabel.Text = "Failed to parse API response."
-            return
-        end
 
-        if decoded.error then
-            StatusLabel.TextColor3 = Color3.fromRGB(255, 100, 100)
-            StatusLabel.Text = "API Error: " .. tostring(decoded.error.message)
-            return
-        end
+        if success and decoded and decoded.models then
+            for _, child in ipairs(ModelScroll:GetChildren()) do
+                if child:IsA("TextButton") then child:Destroy() end
+            end
 
-        if decoded.models then
             local count = 0
             for _, model in ipairs(decoded.models) do
-                local supportsGenerate = false
-                if model.supportedGenerationMethods then
-                    for _, method in ipairs(model.supportedGenerationMethods) do
-                        if method == "generateContent" then
-                            supportsGenerate = true
-                            break
-                        end
-                    end
-                end
-
-                if supportsGenerate then
+                local modelPath = model.name or ""
+                if isWorkingModel(modelPath) then
                     count = count + 1
-                    local cleanName = model.displayName or model.name:gsub("models/", "")
-                    local fullPath = model.name
+                    local cleanName = model.displayName or modelPath:gsub("models/", "")
 
                     local ModelBtn = Instance.new("TextButton")
-                    ModelBtn.Size = UDim2.new(1, -10, 0, 42)
+                    ModelBtn.Size = UDim2.new(1, 0, 0, 36)
                     ModelBtn.BackgroundColor3 = Color3.fromRGB(32, 35, 44)
-                    ModelBtn.Text = cleanName .. " (" .. model.name:gsub("models/", "") .. ")"
+                    ModelBtn.Text = "  " .. cleanName
                     ModelBtn.TextColor3 = Color3.fromRGB(240, 240, 245)
                     ModelBtn.Font = Enum.Font.SourceSansBold
                     ModelBtn.TextSize = 13
-                    ModelBtn.Parent = ModelScroll                    local ModelBtnCorner = Instance.new("UICorner")
-                    ModelBtnCorner.CornerRadius = UDim.new(0, 6)
-                    ModelBtnCorner.Parent = ModelBtn
+                    ModelBtn.TextXAlignment = Enum.TextXAlignment.Left
+                    ModelBtn.Parent = ModelScroll
+
+                    local BtnCorner = Instance.new("UICorner")
+                    BtnCorner.CornerRadius = UDim.new(0, 6)
+                    BtnCorner.Parent = ModelBtn
 
                     ModelBtn.MouseButton1Click:Connect(function()
-                        SELECTED_MODEL_PATH = fullPath
+                        API_KEY = key
+                        SELECTED_MODEL_PATH = modelPath
+                        
                         ModelFrame.Visible = false
-                        TopBarBtn.Visible = true
                         ChatFrame.Visible = true
-                        GeminiTitle.Text = "Gemini (" .. model.name:gsub("models/", "") .. ")"
+                        TopBarBtn.Visible = true
+                        GeminiTitle.Text = "Gemini AI (" .. cleanName .. ")"
 
-                        ChatFrame:TweenPosition(UDim2.new(0.5, -220, 1, -345), Enum.EasingDirection.Out, Enum.EasingStyle.Quart, 0.4, true)
-                        addChatBubble("Gemini", "Hello! What script would you like me to build for you today?")
+                        addChatBubble("Gemini", "Connected via model: " .. cleanName .. "\nWhat script can I write for you?")
                     end)
                 end
             end
 
             if count > 0 then
-                ModelScroll.CanvasSize = UDim2.new(0, 0, 0, count * 48)
+                ModelScroll.CanvasSize = UDim2.new(0, 0, 0, count * 42)
                 KeyFrame.Visible = false
                 ModelFrame.Visible = true
             else
                 StatusLabel.TextColor3 = Color3.fromRGB(255, 100, 100)
-                StatusLabel.Text = "No generateContent models found for this key."
+                StatusLabel.Text = "No valid Gemini models found."
             end
+        else
+            StatusLabel.TextColor3 = Color3.fromRGB(255, 100, 100)
+            StatusLabel.Text = "Invalid API Key."
         end
     end)
 end
 
--- ====================================================================
--- BUTTON CONNECTIONS
--- ====================================================================
 SubmitKeyBtn.MouseButton1Click:Connect(function()
     local key = KeyInput.Text:gsub("%s+", "")
-    if key == "" then
-        StatusLabel.Text = "Please enter an API key first."
-        return
-    end
-
-    API_KEY = key
-    fetchAvailableModels(key)
-end)
-
-local chatOpen = true
-local function toggleChat()
-    chatOpen = not chatOpen
-    if chatOpen then
-        ChatFrame.Visible = true
-        ChatFrame:TweenPosition(UDim2.new(0.5, -220, 1, -345), Enum.EasingDirection.Out, Enum.EasingStyle.Quart, 0.3, true)
+    if #key > 0 then
+        fetchAvailableModels(key)
     else
-        ChatFrame:TweenPosition(UDim2.new(0.5, -220, 1, 10), Enum.EasingDirection.In, Enum.EasingStyle.Quart, 0.3, true, function()
-            ChatFrame.Visible = false
-        end)
+        StatusLabel.TextColor3 = Color3.fromRGB(255, 100, 100)
+        StatusLabel.Text = "Please enter an API Key."
     end
-end
-
-TopBarBtn.MouseButton1Click:Connect(toggleChat)
-CloseBtn.MouseButton1Click:Connect(toggleChat)
+end)
 
 local function handleSend()
     local text = ChatInput.Text
-    if text == "" then return end
-    ChatInput.Text = ""
-    sendToGemini(text)
+    if #text:gsub("%s+", "") > 0 then
+        ChatInput.Text = ""
+        sendToGemini(text)
+    end
 end
 
 SendBtn.MouseButton1Click:Connect(handleSend)
 ChatInput.FocusLost:Connect(function(enterPressed)
-    if enterPressed then
-        handleSend()
-    end
+    if enterPressed then handleSend() end
+end)
+
+CloseBtn.MouseButton1Click:Connect(function()
+    ChatFrame.Visible = false
+end)
+
+TopBarBtn.MouseButton1Click:Connect(function()
+    ChatFrame.Visible = not ChatFrame.Visible
 end)
